@@ -1,5 +1,6 @@
 import { mkdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { CryptoHasher, file, JSON5, write } from 'bun';
 import type { Tensor } from 'onnxruntime-web';
@@ -37,12 +38,10 @@ const FILES = [
   {
     name: 'ort-wasm-simd-threaded.wasm',
     source: wasmBin,
-    hash: 'd1ab1b94b16a65b29d710d0b587b29e7bed336827577623913479b8afe8113e6',
   },
   {
     name: 'ort-wasm-simd-threaded.mjs',
     source: mjsBin,
-    hash: '0a1e718d99c41b22c21f2520ff4f9e883a6b5533856e398d21816ee8eb8185d3',
   },
 ] as const;
 
@@ -72,29 +71,36 @@ class OrtWasmManager {
       await mkdir(this.releaseDir, { recursive: true });
     }
 
-    for (const { name, source, hash } of FILES) {
+    for (const { name, source } of FILES) {
       const dest = resolve(this.releaseDir, name);
       const destFile = Bun.file(dest);
 
+      // 以嵌入资源(source)为准计算摘要, 避免硬编码 hash 与依赖版本脱节后每次启动都重复写入
+      const bytes = await file(source).bytes();
+      const srcHash = new CryptoHasher('sha256').update(bytes).digest('hex');
+
       if (await destFile.exists()) {
         const destHash = new CryptoHasher('sha256').update(await destFile.bytes()).digest('hex');
-        if (destHash === hash) continue;
+        if (destHash === srcHash) continue;
       }
 
-      await write(dest, await file(source).bytes());
+      await write(dest, bytes);
     }
 
     this.isMountWasm = true;
   }
 
   async init(): Promise<void> {
-    if (isPackaged) {
-      await this.releaseWasm();
-      ortEnv.wasm.wasmPaths = {
-        mjs: resolve(this.releaseDir, FILES[1].name),
-        wasm: resolve(this.releaseDir, FILES[0].name),
-      };
-    }
+    // 上方 `import ... with { type: 'file' }` 会把 .mjs 路径注册为 Bun 的 file 资源模块,
+    // 导致 ort-web 内部 import 同一路径时拿到的是资源路径字符串而非 wasm 工厂函数
+    // ("TypeError: c is not a function")。故始终从这份私有副本加载, 路径不同即不会命中资源模块。
+    await this.releaseWasm();
+
+    // ort-web 使用 new URL() 解析 wasmPaths, 因此必须传入 file:// URL 而不是裸路径
+    ortEnv.wasm.wasmPaths = {
+      mjs: pathToFileURL(resolve(this.releaseDir, FILES[1].name)).href,
+      wasm: pathToFileURL(resolve(this.releaseDir, FILES[0].name)).href,
+    };
   }
 }
 

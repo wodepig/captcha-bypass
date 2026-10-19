@@ -1,6 +1,9 @@
 # Build Outputs
 dist
 
+# ONNX Runtime wasm cache
+ort-wasm
+
 # Local config
 .env
 .env.*
